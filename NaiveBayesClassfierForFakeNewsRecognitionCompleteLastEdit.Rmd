@@ -1,0 +1,611 @@
+---
+title: "Naive Bayes classifier for Fake News Recognition"
+author: "Ehsan Eslmai Shafigh 2070769, Sepideh Ghaemifar 2072829"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Theoretical Background
+
+We use the Bayesian Theorem to infer the posterior for the label of a news title. Let's say we have a given *title***,** we want to predict its *label*:
+
+$$
+P(label|title,I)=\frac{P(title|label,I)P(label|I)}{P(title|I)}
+$$
+
+$P(label|title,I)$ is the posterior for the label given the title of the news. $P(title|label,I)$ is the likelihood which we need to calculate from the dataset, and $P(label|I)$ is the prior for the labels. $P(title|I)$ is just a normalization and we will ignore it in the following steps.
+
+In general we have ***m*** categories of labels. We have to compute the posterior $P(label_{i}|title,I)$ for each $label_{i}.$ Then we can look for the maximum posterior obtained, and report the corresponding label as the ***predicted label*** for the news title. Note that if $m = 2$ we have a ***Binomial Bayes Classifier*** and if $m > 2$ we have a ***Multinomial Bayes Classifier.***
+
+The next question is, how we are going to compute the likelihood $P(title|label,I)$. Here we introduce an assumption which makes our classifier **naive**! Let's say the title in discussion has ***n*** words: $word_{1} , word_{2} , word_{3} , ... , word_{n}$. Then we can assume that the likelihood for having a title if the label is $label_{i}$ is simply the product of the likelihoods to have the $word_{j}$ in the title given that its label is $label_{i}$:
+
+$$
+P(title|label_{i},I)= \prod_{j=1}^{n}P(word_{j}|label_{i})
+$$
+
+In other words we assume that the occurrence of each word in a category of labels is independent from the occurrence of another word in the same category. (We ignore the correlations)
+
+We can choose our prior $P(label|I)$ to be anything, but the most logical choice is to choose $P(label_{i}|I)$ to be the ratio of titles belonging to category label *i* to the total number of titles in our dataset.
+
+So putting everything together, we can compute the predicted $label_p$ for a title as:
+
+$$label_p = \arg\max_{i} P(label_{i}|I)\prod_{j=1}^{n}P(word_{j}|label_{i})$$
+
+## The Dataset
+
+We are using two datasets for our project. The first one contains labeled news titles with 6 categories as follows:
+
+-   **Barely-True** : labeled as **0**
+
+-   **False**: labeled as **1**
+
+-   **Half-True**: labeled as **2**
+
+-   **Mostly-True**: labeled as **3**
+
+-   **Not-Known**: labeled as **4**
+
+-   **True**: labeled as **5**
+
+Here we load the dataset:
+
+```{r}
+
+df1 <- read.csv("C:/Users/PoD/Desktop/R project/archive/train1.csv")
+```
+
+```{r}
+
+head(df1)
+```
+
+```{r}
+
+cat(nrow(df1))
+```
+
+We allocate 75% of the full dataset into training and the rest into testing:
+
+```{r}
+# Set the seed for reproducibility
+set.seed(123)
+
+# Calculate the number of rows for the training set
+train_size <- floor(0.75 * nrow(df1))
+
+# Generate random row indices for the training set
+train_indices <- sample(seq_len(nrow(df1)), size = train_size)
+
+# Create the training set
+train1 <- df1[train_indices, ]
+
+# Create the test set
+test1 <- df1[-train_indices, ]
+```
+
+In the second dataset the there are only two categories of labels:
+
+-   **unreliable**: labeled as **1**
+
+-   **reliable**: labeled as **0**
+
+```{r}
+
+df2 <- read.csv("C:/Users/PoD/Desktop/R project/archive/train2.csv")
+```
+
+```{r}
+
+head(df2)
+```
+
+```{r}
+
+cat(nrow(df2))
+```
+
+```{r}
+
+# Set the seed for reproducibility
+set.seed(123)
+
+# Calculate the number of rows for the training set
+train_size <- floor(0.75 * nrow(df2))
+
+# Generate random row indices for the training set
+train_indices <- sample(seq_len(nrow(df2)), size = train_size)
+
+# Create the training set
+train2 <- df2[train_indices, ]
+
+# Create the test set
+test2 <- df2[-train_indices, ]
+```
+
+## The Functions
+
+In this section we introduce the functions to be used throughout the project.
+
+### Creating Sanitized Dictionaries for Each Category of Labels
+
+We define the **extract_words()** function for this purpose:
+
+```{r}
+
+# Function to preprocess the text and create dictionaries
+extract_words <- function(category, dictionary) {
+  stopwords <- stopwords("english")  # Load English stop words
+  
+  for (entry in category) {
+    # Remove punctuation and tokenize: we first replace punctuations with space,     and then split the string(text to a list of words)
+    words <- str_split(gsub("[[:punct:]]", "", entry), "\\s+")
+    # convert to lowercase
+    words <- unlist(words)
+    words <- tolower(words)
+    
+    # Stop word removal: we create a mask and remove the stopwords(e.g. I, my.         ,and,to,...)
+    words <- words[!words %in% stopwords]
+    
+    # Token normalization: Stemming (Stemming is a process in natural language         processing (NLP) that aims to reduce words to their base or root form, The         purpose of stemming is to reduce the derived forms of a word to a common           form)
+    
+    words <- wordStem(words, language = "en")
+    
+    # We compute the frequency of each word, using the termFreq() which returns        a named list
+    words <- termFreq(words)
+    
+    
+    # Update the dictionary
+    for (word in names(words)) {
+      if (word %in% names(dictionary)) {
+        dictionary[[word]] <- dictionary[[word]] + words[[word]]
+      } else {
+        dictionary[[word]] <- words[[word]]
+      }
+    }
+  }
+  
+  return(dictionary)
+}
+
+```
+
+We have two input variables for this function: category is the series of titles which have a specific label. dictionary, is a named list in which the names are the words and the values are the occurrence of the words in the category given. The function returns an updated dictionary after sanitizing the words.
+
+### Computing The Likelihoods For Words in Each Category
+
+We use the **count_to_prob()** function as defined below to compute $P(word_{j}|label_{i})$:
+
+```{r}
+
+# Function to calculate probabilities from counts
+count_to_prob <- function(dictionary, totalwords) {
+  for (term in names(dictionary)) {
+    dictionary[[term]] <- dictionary[[term]] / totalwords
+  }
+  return(dictionary)
+}
+```
+
+The function takes as input the dictionary belonging to a specific label and assign a probability for the occurrence of a specific word within each category of labels. It returns an updated dictionary.
+
+### Computing The Posterior For a Label, Given a Title
+
+The function **calculate_probability()** computes $P(label_{i}|title,I) = P(label_{i})\prod_{j=1}^{n}P(word_{j}|label_{i})$
+
+#### A note on calculating the joint probability: $P(title|label_{i},I)$
+
+Suppose we want to predict the label of the title: *"Sky is Blue"*. After sanitizing we get a list of words for the title: $[sky , blue]$. The next step is to calculate the likelihood for each word in the list:
+
+$$
+P(title|label_{i}) = P(sky|label_{i}) \times P(blue|label_{i}) 
+$$
+
+We need to compute the above value for each label $i$. But now suppose that the word sky is only present in dictionary $j$ and not in the rest of the dictionaries. In that case our algorithm skips computing the likelihood for a dictionary other than *j:* $P(sky|label_{k \neq j})$ But this automatically decreases the posterioer probability $P(label_{j}|title)$ in comparison to the rest.
+
+To solve this problem, before calculating the posterior for each label in the below function, we first check that the word is present in all of the dictionaries and if not we skip that word completely for all of the labels.
+
+```{r}
+# Function to calculate probability of a document belonging to a label
+calculate_probability <- function(dictionaries, dictionary, X, initial) {
+  X <- gsub("[[:punct:]]", "", X)
+  X <- tolower(X)
+  split <- str_split(X, "\\s+")
+  probability <- initial
+  
+  # Normalize the words using stemming
+  normalized_words <- wordStem(split[[1]], language = "en")
+  
+  # We first need to check that the word is present in all dictionaries
+  for (term in normalized_words) {
+    present_in_all <- TRUE
+    
+    for (dict in dictionaries) {
+      if (!(term %in% names(dict))) {
+        present_in_all <- FALSE
+        break
+      }
+    }
+    
+    if (present_in_all) {
+      probability <- probability * dictionary[[term]]
+    }
+  }
+  
+  return(probability)
+}
+
+```
+
+As input it gets a named list of all dictionaries and the prior for the label of our interest and the title. It returns the posterior probability for the specific label we are looking at, given the title.
+
+### Predicting The Label
+
+Finally we compute the predicted label using the function:
+
+```{r}
+
+# Function to predict label for a document
+predict_label <- function(dictionaries, X, priors) {
+  max_probability <- -Inf
+  max_dictionary_name <- NULL
+  
+  for (i in 1:length(dictionaries)) {
+    dictionary <- dictionaries[[i]]
+    probability <- calculate_probability(dictionaries,dictionary, X, priors[i])
+    
+    if (probability > max_probability) {
+      max_probability <- probability
+      max_dictionary_name <- names(dictionaries)[i]
+    }
+  }
+  
+  return(as.integer(max_dictionary_name))
+}
+```
+
+This function relies on the previous function defined above, to calculate the posterior for all the labels, and then returns the label number which is most probable.
+
+We load the necessary libraries before we proceed:
+
+```{r}
+
+library(tm)
+library(NLP)
+library(ggplot2)
+library(caret)
+library(pROC)
+library(stringr)
+library(SnowballC)
+library(wordcloud)
+```
+
+## The First Dataset: Multinomial Naive Bayes Classifier
+
+We apply the theory and functions defined above, to predict the labels of the first dataset. First we create the dictionaries for each label using the training data. Then we evaluate our model by applying it in the test data.
+
+```{r}
+
+# Create dictionaries for each label
+Dict_Lable_BT <- extract_words(train1$Text[train1$Labels == 0], list())
+Dict_Lable_F <- extract_words(train1$Text[train1$Labels == 1], list())
+Dict_Lable_HT <- extract_words(train1$Text[train1$Labels == 2], list())
+Dict_Lable_MT <- extract_words(train1$Text[train1$Labels == 3], list())
+Dict_Lable_NK <- extract_words(train1$Text[train1$Labels == 4], list())
+Dict_Lable_T <- extract_words(train1$Text[train1$Labels == 5], list())
+```
+
+```{r}
+
+
+wordcloud(words = names(Dict_Lable_T), freq = unlist(Dict_Lable_T), scale = c(5, 0.3), min.freq = 12,
+          random.order = FALSE, colors = brewer.pal(8, "Dark2"))
+
+```
+
+```{r}
+
+wordcloud(words = names(Dict_Lable_F), freq = unlist(Dict_Lable_F), scale = c(5, 0.3), min.freq = 7,
+          random.order = FALSE, colors = brewer.pal(8, "Dark2"))
+```
+
+For the **count_to_prob** function we need the number of total words in each label category:
+
+```{r}
+
+total_num_BT <- sum(unlist(Dict_Lable_BT))
+total_num_F <- sum(unlist(Dict_Lable_F))
+total_num_HT <- sum(unlist(Dict_Lable_HT))
+total_num_MT <- sum(unlist(Dict_Lable_MT))
+total_num_NK <- sum(unlist(Dict_Lable_NK))
+total_num_T <- sum(unlist(Dict_Lable_T))
+```
+
+```{r}
+
+P_Dict_BT <- count_to_prob(Dict_Lable_BT, total_num_BT) 
+P_Dict_F <- count_to_prob(Dict_Lable_F, total_num_F) 
+P_Dict_HT <- count_to_prob(Dict_Lable_HT, total_num_HT) 
+P_Dict_MT <- count_to_prob(Dict_Lable_MT, total_num_MT) 
+P_Dict_NK <- count_to_prob(Dict_Lable_NK, total_num_NK) 
+P_Dict_T <- count_to_prob(Dict_Lable_T, total_num_T) 
+```
+
+Next we create a named list of all dictionaries:
+
+```{r}
+
+Dictionaries <- list('0' = P_Dict_BT, '1' = P_Dict_F, '2' = P_Dict_HT, '3' = P_Dict_MT, '4' = P_Dict_NK, '5' = P_Dict_T)
+```
+
+And finally the priors for each label:
+
+```{r}
+
+priors = c(sum(train1$Labels == 0),sum(train1$Labels == 1),sum(train1$Labels == 2),sum(train1$Labels == 3),sum(train1$Labels == 4),sum(train1$Labels == 5))/nrow(train1)
+```
+
+```{r}
+
+# Calculate label counts in the training dataset
+label_counts <- table(train1$Labels)
+
+# Create a data frame for label distribution
+label_data <- data.frame(Label = names(label_counts),
+                         Count = as.numeric(label_counts))
+
+# Create the label distribution plot
+label_plot <- ggplot(label_data, aes(x = Label, y = Count, fill = Label)) +
+  geom_bar(stat = "identity", width = 0.5, color = "black") +
+  labs(title = "Label Distribution in Training Dataset",
+       x = "Label", y = "Count") +
+  theme_minimal() +
+  theme(plot.title = element_text(size = 14, face = "bold"),
+        axis.title = element_text(size = 12),
+        axis.text = element_text(size = 11),
+        legend.position = "none")
+
+# Display the label distribution plot
+label_plot
+
+```
+
+### Model's Performance on Training Data
+
+we apply the predict_label function to the training data to create a new column for predicted labels:
+
+```{r}
+train1$predicted_label <- sapply(train1$Text, predict_label, dictionaries = Dictionaries, priors = priors)
+```
+
+```{r}
+
+head(train1)
+```
+
+The accuracy of our model can be calculated easily, by counting the number of correct predictions:
+
+```{r}
+
+accuracy <- sum(train1$predicted_label == train1$Labels) / nrow(train1)
+cat("Accuracy:", accuracy, "\n")
+```
+
+We can also create a confusion matrix:
+
+```{r}
+
+train1$predicted_label <- factor(train1$predicted_label, levels = c(0, 1, 2, 3, 4, 5))
+train1$Labels <- factor(train1$Labels, levels = c(0, 1, 2, 3, 4, 5))
+```
+
+```{r}
+
+# Create Confusion Matrix
+confusion <- confusionMatrix(train1$predicted_label, train1$Labels)
+print(confusion)
+```
+
+**Sensitivity**: Sensitivity, also known as True Positive Rate , measures the proportion of actual positive instances (in each class) that are correctly identified by the model. It is calculated as the ratio of true positives to the sum of true positives and false negatives. Higher sensitivity values indicate better performance in correctly identifying positive instances. In the table, it is shown for each class (0, 1, 2, 3, 4, 5).
+
+**Specificity**: Specificity measures the proportion of actual negative instances (in each class) that are correctly identified by the model. It is calculated as the ratio of true negatives to the sum of true negatives and false positives. Higher specificity values indicate better performance in correctly identifying negative instances. In the table, it is shown for each class (0, 1, 2, 3, 4, 5).
+
+**Balanced Accuracy**: Balanced Accuracy calculates the average of sensitivity and specificity and provides an overall measure of model performance across all classes. It is calculated as (Sensitivity + Specificity) / 2. Higher balanced accuracy values indicate better overall performance. In the table, it is shown for each class (0, 1, 2, 3, 4, 5).
+
+### Model's Performance on Test Data
+
+Now we applied the learned model on the test data:
+
+```{r}
+
+test1$predicted_label <- sapply(test1$Text, predict_label, dictionaries = Dictionaries, priors = priors)
+```
+
+```{r}
+
+accuracy <- sum(test1$predicted_label == test1$Labels) / nrow(test1)
+cat("Accuracy:", accuracy, "\n")
+```
+
+```{r}
+
+
+test1$predicted_label <- factor(test1$predicted_label, levels = c(0, 1, 2, 3, 4, 5))
+test1$Labels <- factor(test1$Labels, levels = c(0, 1, 2, 3, 4, 5))
+```
+
+```{r}
+# Create Confusion Matrix
+confusion <- confusionMatrix(test1$predicted_label, test1$Labels)
+print(confusion)
+```
+
+```{r}
+
+
+# Calculate label counts for Dataset 1
+label_counts_dataset1 <- table(train1$Labels)
+predicted_label_counts_dataset1 <- table(train1$predicted_label)
+
+# Create data frames for label and predicted label distribution in Dataset 1
+label_data_dataset1 <- data.frame(Label = names(label_counts_dataset1),
+                                  Count = as.numeric(label_counts_dataset1),
+                                  Dataset = "Dataset 1",
+                                  Type = "True Label")
+predicted_label_data_dataset1 <- data.frame(Label = names(predicted_label_counts_dataset1),
+                                            Count = as.numeric(predicted_label_counts_dataset1),
+                                            Dataset = "Dataset 1",
+                                            Type = "Predicted Label")
+
+# Combine the data frames for Dataset 1
+combined_data_dataset1 <- rbind(label_data_dataset1, predicted_label_data_dataset1)
+
+# Create the plot for Dataset 1
+plot_dataset1 <- ggplot(combined_data_dataset1, aes(x = Label, y = Count, fill = Type)) +
+  geom_bar(stat = "identity", position = "dodge", width = 0.7, color = "black") +
+  geom_line(aes(group = Type, linetype = Type), position = "dodge", size = 1.5) +
+  labs(title = "Label Distribution in Dataset 1",
+       x = "Label", y = "Count", fill = "Type") +
+  theme_minimal() +
+  theme(plot.title = element_text(size = 14, face = "bold"),
+        axis.title = element_text(size = 12),
+        axis.text = element_text(size = 11),
+        legend.title = element_text(size = 11),
+        legend.text = element_text(size = 10))
+
+
+
+# Display the plots for Dataset 1
+plot_dataset1
+
+```
+
+## The Second Dataset: Binomial Naive Bayes Classifier
+
+We take the same procedure for the second dataset. This time we have only two categories of labels.
+
+```{r}
+
+# Create dictionaries for each label
+Dict_Lable_R <- extract_words(train2$title[train2$label == 0], list())
+Dict_Lable_U <- extract_words(train2$title[train2$label == 1], list())
+```
+
+```{r}
+
+total_num_R <- sum(unlist(Dict_Lable_R))
+total_num_U <- sum(unlist(Dict_Lable_U))
+```
+
+```{r}
+
+# Calculate probabilities for each label
+P_Dict_R <- count_to_prob(Dict_Lable_R, total_num_R) 
+P_Dict_U <- count_to_prob(Dict_Lable_U, total_num_U) 
+
+```
+
+```{r}
+
+# Create a named list with number names
+Dictionaries <- list('0' = P_Dict_R, '1' = P_Dict_U)
+priors = c(sum(train2$label == 0),sum(train2$label == 1))/nrow(train2)
+```
+
+### Model's Performance on Training Data
+
+```{r}
+
+# Predict labels for the data
+train2$predicted_label <- sapply(train2$title, predict_label, dictionaries = Dictionaries, priors = priors)
+```
+
+```{r}
+
+# Calculate accuracy
+accuracy <- sum(train2$predicted_label == train2$label) / nrow(train2)
+cat("Accuracy:", accuracy, "\n")
+```
+
+```{r}
+
+train2$predicted_label <- factor(train2$predicted_label, levels = c(0, 1))
+train2$label <- factor(train2$label, levels = c(0, 1))
+
+```
+
+```{r}
+
+# Create Confusion Matrix
+confusion <- confusionMatrix(train2$predicted_label, train2$label)
+print(confusion)
+```
+
+### Model's Performance on Test Data
+
+```{r}
+
+test2$predicted_label <- sapply(test2$title, predict_label, dictionaries = Dictionaries, priors = priors)
+```
+
+```{r}
+
+accuracy <- sum(test2$predicted_label == test2$label) / nrow(test2)
+cat("Accuracy:", accuracy, "\n")
+```
+
+```{r}
+
+test2$predicted_label <- factor(test2$predicted_label, levels = c(0, 1))
+test2$label<- factor(test2$label, levels = c(0, 1))
+```
+
+```{r}
+confusion <- confusionMatrix(test2$predicted_label, test2$label)
+print(confusion)
+```
+
+```{r}
+
+# Calculate label counts for Dataset 2
+label_counts_dataset2 <- table(train2$label)
+predicted_label_counts_dataset2 <- table(train2$predicted_label)
+
+# Create data frames for label and predicted label distribution in Dataset 2
+label_data_dataset2 <- data.frame(Label = names(label_counts_dataset2),
+                                  Count = as.numeric(label_counts_dataset2),
+                                  Dataset = "Dataset 2",
+                                  Type = "True Label")
+predicted_label_data_dataset2 <- data.frame(Label = names(predicted_label_counts_dataset2),
+                                            Count = as.numeric(predicted_label_counts_dataset2),
+                                            Dataset = "Dataset 2",
+                                            Type = "Predicted Label")
+
+# Combine the data frames for Dataset 2
+combined_data_dataset2 <- rbind(label_data_dataset2, predicted_label_data_dataset2)
+
+# Create the plot for Dataset 2
+plot_dataset2 <- ggplot(combined_data_dataset2, aes(x = Label, y = Count, fill = Type)) +
+  geom_bar(stat = "identity", position = "dodge", width = 0.7, color = "black") +
+  geom_line(aes(group = Type, linetype = Type), position = "dodge", size = 1.5) +
+  labs(title = "Label Distribution in Dataset 2",
+       x = "Label", y = "Count", fill = "Type") +
+  theme_minimal() +
+  theme(plot.title = element_text(size = 14, face = "bold"),
+        axis.title = element_text(size = 12),
+        axis.text = element_text(size = 11),
+        legend.title = element_text(size = 11),
+        legend.text = element_text(size = 10))
+
+# Display the plots for Dataset 1
+plot_dataset2
+```
+
+## Conclusions
+
+In conclusion, our project's findings suggest that the accuracy of the Naive Bayes classifier is higher when the number of labels is lower. This observation can be attributed to the reduced complexity and clearer class boundaries associated with a smaller number of labels. When there are fewer classes to differentiate between, the model can more effectively capture the distinctive features that separate the classes, leading to higher accuracy. Conversely, as the number of labels increases, the classes become more similar, resulting in increased ambiguity and reduced accuracy. Therefore, simplifying the classification task by reducing the number of labels enhances the model's performance in distinguishing between different classes of news titles.
