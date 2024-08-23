@@ -1,6 +1,5 @@
 ---
 title: "Naive Bayes classifier for Fake News Recognition"
-author: "Ehsan Eslmai Shafigh 2070769, Sepideh Ghaemifar 2072829"
 date: "`r Sys.Date()`"
 output:
   html_document:
